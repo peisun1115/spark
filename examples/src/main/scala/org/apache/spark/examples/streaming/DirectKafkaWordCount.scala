@@ -36,7 +36,7 @@ import org.apache.spark.SparkConf
  */
 object DirectKafkaWordCount {
   def main(args: Array[String]) {
-    if (args.length < 2) {
+    if (args.length < 4) {
       System.err.println(s"""
         |Usage: DirectKafkaWordCount <brokers> <topics>
         |  <brokers> is a list of one or more Kafka brokers
@@ -50,9 +50,13 @@ object DirectKafkaWordCount {
 
     val Array(brokers, topics) = args
 
+
     // Create context with 2 second batch interval
     val sparkConf = new SparkConf().setAppName("DirectKafkaWordCount")
-    val ssc = new StreamingContext(sparkConf, Seconds(2))
+    val ssc = new StreamingContext(sparkConf, Seconds(args(2).toInt))
+    ssc.checkpoint(args(3))
+    // Initial state RDD for mapWithState operation
+    val initialRDD = ssc.sparkContext.parallelize(List(("hello", 1), ("world", 1)))
 
     // Create direct kafka stream with brokers and topics
     val topicsSet = topics.split(",").toSet
@@ -63,10 +67,20 @@ object DirectKafkaWordCount {
     // Get the lines, split them into words, count the words and print
     val lines = messages.map(_._2)
     val words = lines.flatMap(_.split(" "))
-    val wordCounts = words.map(x => (x, 1L)).reduceByKey(_ + _)
-    wordCounts.print()
+    val wordDstream = words.map(x => (x, 1))
 
-    // Start the computation
+    // Update the cumulative count using mapWithState
+    // This will give a DStream made of state (which is the cumulative count of the words)
+    val mappingFunc = (word: String, one: Option[Int], state: State[Int]) => {
+      val sum = one.getOrElse(0) + state.getOption.getOrElse(0)
+      val output = (word, sum)
+      state.update(sum)
+      output
+    }
+
+    val stateDstream = wordDstream.mapWithState(
+      StateSpec.function(mappingFunc).initialState(initialRDD))
+    stateDstream.print()
     ssc.start()
     ssc.awaitTermination()
   }

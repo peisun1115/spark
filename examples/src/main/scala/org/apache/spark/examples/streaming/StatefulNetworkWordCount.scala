@@ -36,18 +36,16 @@ import org.apache.spark.streaming._
  */
 object StatefulNetworkWordCount {
   def main(args: Array[String]) {
-    if (args.length < 2) {
-      System.err.println("Usage: StatefulNetworkWordCount <hostname> <port>")
+    if (args.length < 4) {
+      System.err.println("Usage: StatefulNetworkWordCount <hostname> <port> batchsize checkpoint")
       System.exit(1)
     }
 
     StreamingExamples.setStreamingLogLevels()
 
     val sparkConf = new SparkConf().setAppName("StatefulNetworkWordCount")
-    // Create the context with a 1 second batch size
-    val ssc = new StreamingContext(sparkConf, Seconds(1))
-    val checkpointDirectory = "alluxio://localhost:19998/checkpoint"
-    ssc.checkpoint(checkpointDirectory)
+    val ssc = new StreamingContext(sparkConf, Seconds(args(2).toInt))
+    ssc.checkpoint(args(3))
 
     // Initial state RDD for mapWithState operation
     val initialRDD = ssc.sparkContext.parallelize(List(("hello", 1), ("world", 1)))

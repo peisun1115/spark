@@ -19,8 +19,8 @@
 package org.apache.spark.examples
 
 import scala.math.random
-
 import org.apache.spark._
+import org.apache.spark.storage.StorageLevel
 
 /** Computes an approximation to pi */
 object SparkPi {
@@ -36,6 +36,8 @@ object SparkPi {
     }.reduce(_ + _)
     println("Pi is roughly " + 4.0 * count / n)
     spark.stop()
+    var r = spark.textFile("/tmp/a")
+    r.persist(StorageLevel.MEMORY_ONLY_2)
   }
 }
 // scalastyle:on println

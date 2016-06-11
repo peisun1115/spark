@@ -46,7 +46,8 @@ object StatefulNetworkWordCount {
     val sparkConf = new SparkConf().setAppName("StatefulNetworkWordCount")
     // Create the context with a 1 second batch size
     val ssc = new StreamingContext(sparkConf, Seconds(1))
-    ssc.checkpoint(".")
+    val checkpointDirectory = "alluxio://localhost:19998/checkpoint"
+    ssc.checkpoint(checkpointDirectory)
 
     // Initial state RDD for mapWithState operation
     val initialRDD = ssc.sparkContext.parallelize(List(("hello", 1), ("world", 1)))

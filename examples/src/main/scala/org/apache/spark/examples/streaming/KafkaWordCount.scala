@@ -49,10 +49,10 @@ object KafkaWordCount {
 
     StreamingExamples.setStreamingLogLevels()
 
-    val Array(zkQuorum, group, topics, numThreads) = args
+    val Array(zkQuorum, group, topics, numThreads, checkpoint) = args
     val sparkConf = new SparkConf().setAppName("KafkaWordCount")
     val ssc = new StreamingContext(sparkConf, Seconds(2))
-    ssc.checkpoint(args(4))
+    ssc.checkpoint(checkpoint)
 
     val topicMap = topics.split(",").map((_, numThreads.toInt)).toMap
     val lines = KafkaUtils.createStream(ssc, zkQuorum, group, topicMap).map(_._2)

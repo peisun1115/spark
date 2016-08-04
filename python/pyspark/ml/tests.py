@@ -16,7 +16,7 @@
 #
 
 """
-Unit tests for Spark ML Python APIs.
+Unit tests for MLlib Python DataFrame-based APIs.
 """
 import sys
 if sys.version > '3':
@@ -61,7 +61,7 @@ from pyspark.ml.regression import LinearRegression, DecisionTreeRegressor, \
     GeneralizedLinearRegression
 from pyspark.ml.tuning import *
 from pyspark.ml.wrapper import JavaParams
-from pyspark.mllib.common import _java2py
+from pyspark.ml.common import _java2py
 from pyspark.serializers import PickleSerializer
 from pyspark.sql import DataFrame, Row, SparkSession
 from pyspark.sql.functions import rand
@@ -610,17 +610,21 @@ class TrainValidationSplitTests(SparkSessionTestCase):
         iee = InducedErrorEstimator()
         evaluator = RegressionEvaluator(metricName="rmse")
 
-        grid = (ParamGridBuilder()
-                .addGrid(iee.inducedError, [100.0, 0.0, 10000.0])
-                .build())
+        grid = ParamGridBuilder() \
+            .addGrid(iee.inducedError, [100.0, 0.0, 10000.0]) \
+            .build()
         tvs = TrainValidationSplit(estimator=iee, estimatorParamMaps=grid, evaluator=evaluator)
         tvsModel = tvs.fit(dataset)
         bestModel = tvsModel.bestModel
         bestModelMetric = evaluator.evaluate(bestModel.transform(dataset))
+        validationMetrics = tvsModel.validationMetrics
 
         self.assertEqual(0.0, bestModel.getOrDefault('inducedError'),
                          "Best model should have zero induced error")
         self.assertEqual(0.0, bestModelMetric, "Best model has RMSE of 0")
+        self.assertEqual(len(grid), len(validationMetrics),
+                         "validationMetrics has the same size of grid parameter")
+        self.assertEqual(0.0, min(validationMetrics))
 
     def test_fit_maximize_metric(self):
         dataset = self.spark.createDataFrame([
@@ -633,17 +637,21 @@ class TrainValidationSplitTests(SparkSessionTestCase):
         iee = InducedErrorEstimator()
         evaluator = RegressionEvaluator(metricName="r2")
 
-        grid = (ParamGridBuilder()
-                .addGrid(iee.inducedError, [100.0, 0.0, 10000.0])
-                .build())
+        grid = ParamGridBuilder() \
+            .addGrid(iee.inducedError, [100.0, 0.0, 10000.0]) \
+            .build()
         tvs = TrainValidationSplit(estimator=iee, estimatorParamMaps=grid, evaluator=evaluator)
         tvsModel = tvs.fit(dataset)
         bestModel = tvsModel.bestModel
         bestModelMetric = evaluator.evaluate(bestModel.transform(dataset))
+        validationMetrics = tvsModel.validationMetrics
 
         self.assertEqual(0.0, bestModel.getOrDefault('inducedError'),
                          "Best model should have zero induced error")
         self.assertEqual(1.0, bestModelMetric, "Best model has R-squared of 1")
+        self.assertEqual(len(grid), len(validationMetrics),
+                         "validationMetrics has the same size of grid parameter")
+        self.assertEqual(1.0, max(validationMetrics))
 
     def test_save_load(self):
         # This tests saving and loading the trained model only.
@@ -668,6 +676,36 @@ class TrainValidationSplitTests(SparkSessionTestCase):
         loadedLrModel = LogisticRegressionModel.load(tvsModelPath)
         self.assertEqual(loadedLrModel.uid, lrModel.uid)
         self.assertEqual(loadedLrModel.intercept, lrModel.intercept)
+
+    def test_copy(self):
+        dataset = self.spark.createDataFrame([
+            (10, 10.0),
+            (50, 50.0),
+            (100, 100.0),
+            (500, 500.0)] * 10,
+            ["feature", "label"])
+
+        iee = InducedErrorEstimator()
+        evaluator = RegressionEvaluator(metricName="r2")
+
+        grid = ParamGridBuilder() \
+            .addGrid(iee.inducedError, [100.0, 0.0, 10000.0]) \
+            .build()
+        tvs = TrainValidationSplit(estimator=iee, estimatorParamMaps=grid, evaluator=evaluator)
+        tvsModel = tvs.fit(dataset)
+        tvsCopied = tvs.copy()
+        tvsModelCopied = tvsModel.copy()
+
+        self.assertEqual(tvs.getEstimator().uid, tvsCopied.getEstimator().uid,
+                         "Copied TrainValidationSplit has the same uid of Estimator")
+
+        self.assertEqual(tvsModel.bestModel.uid, tvsModelCopied.bestModel.uid)
+        self.assertEqual(len(tvsModel.validationMetrics),
+                         len(tvsModelCopied.validationMetrics),
+                         "Copied validationMetrics has the same size of the original")
+        for index in range(len(tvsModel.validationMetrics)):
+            self.assertEqual(tvsModel.validationMetrics[index],
+                             tvsModelCopied.validationMetrics[index])
 
 
 class PersistenceTest(SparkSessionTestCase):
@@ -709,12 +747,32 @@ class PersistenceTest(SparkSessionTestCase):
         except OSError:
             pass
 
+    def _compare_params(self, m1, m2, param):
+        """
+        Compare 2 ML Params instances for the given param, and assert both have the same param value
+        and parent. The param must be a parameter of m1.
+        """
+        # Prevent key not found error in case of some param in neither paramMap nor defaultParamMap.
+        if m1.isDefined(param):
+            paramValue1 = m1.getOrDefault(param)
+            paramValue2 = m2.getOrDefault(m2.getParam(param.name))
+            if isinstance(paramValue1, Params):
+                self._compare_pipelines(paramValue1, paramValue2)
+            else:
+                self.assertEqual(paramValue1, paramValue2)  # for general types param
+            # Assert parents are equal
+            self.assertEqual(param.parent, m2.getParam(param.name).parent)
+        else:
+            # If m1 is not defined param, then m2 should not, too. See SPARK-14931.
+            self.assertFalse(m2.isDefined(m2.getParam(param.name)))
+
     def _compare_pipelines(self, m1, m2):
         """
         Compare 2 ML types, asserting that they are equivalent.
         This currently supports:
          - basic types
          - Pipeline, PipelineModel
+         - OneVsRest, OneVsRestModel
         This checks:
          - uid
          - type
@@ -725,8 +783,7 @@ class PersistenceTest(SparkSessionTestCase):
         if isinstance(m1, JavaParams):
             self.assertEqual(len(m1.params), len(m2.params))
             for p in m1.params:
-                self.assertEqual(m1.getOrDefault(p), m2.getOrDefault(p))
-                self.assertEqual(p.parent, m2.getParam(p.name).parent)
+                self._compare_params(m1, m2, p)
         elif isinstance(m1, Pipeline):
             self.assertEqual(len(m1.getStages()), len(m2.getStages()))
             for s1, s2 in zip(m1.getStages(), m2.getStages()):
@@ -735,6 +792,13 @@ class PersistenceTest(SparkSessionTestCase):
             self.assertEqual(len(m1.stages), len(m2.stages))
             for s1, s2 in zip(m1.stages, m2.stages):
                 self._compare_pipelines(s1, s2)
+        elif isinstance(m1, OneVsRest) or isinstance(m1, OneVsRestModel):
+            for p in m1.params:
+                self._compare_params(m1, m2, p)
+            if isinstance(m1, OneVsRestModel):
+                self.assertEqual(len(m1.models), len(m2.models))
+                for x, y in zip(m1.models, m2.models):
+                    self._compare_pipelines(x, y)
         else:
             raise RuntimeError("_compare_pipelines does not yet support type: %s" % type(m1))
 
@@ -794,6 +858,24 @@ class PersistenceTest(SparkSessionTestCase):
                 rmtree(temp_path)
             except OSError:
                 pass
+
+    def test_onevsrest(self):
+        temp_path = tempfile.mkdtemp()
+        df = self.spark.createDataFrame([(0.0, Vectors.dense(1.0, 0.8)),
+                                         (1.0, Vectors.sparse(2, [], [])),
+                                         (2.0, Vectors.dense(0.5, 0.5))] * 10,
+                                        ["label", "features"])
+        lr = LogisticRegression(maxIter=5, regParam=0.01)
+        ovr = OneVsRest(classifier=lr)
+        model = ovr.fit(df)
+        ovrPath = temp_path + "/ovr"
+        ovr.save(ovrPath)
+        loadedOvr = OneVsRest.load(ovrPath)
+        self._compare_pipelines(ovr, loadedOvr)
+        modelPath = temp_path + "/ovrModel"
+        model.save(modelPath)
+        loadedModel = OneVsRestModel.load(modelPath)
+        self._compare_pipelines(model, loadedModel)
 
     def test_decisiontree_classifier(self):
         dt = DecisionTreeClassifier(maxDepth=1)
@@ -1016,27 +1098,6 @@ class OneVsRestTests(SparkSessionTestCase):
         output = model.transform(df)
         self.assertEqual(output.columns, ["label", "features", "prediction"])
 
-    def test_save_load(self):
-        temp_path = tempfile.mkdtemp()
-        df = self.spark.createDataFrame([(0.0, Vectors.dense(1.0, 0.8)),
-                                         (1.0, Vectors.sparse(2, [], [])),
-                                         (2.0, Vectors.dense(0.5, 0.5))],
-                                        ["label", "features"])
-        lr = LogisticRegression(maxIter=5, regParam=0.01)
-        ovr = OneVsRest(classifier=lr)
-        model = ovr.fit(df)
-        ovrPath = temp_path + "/ovr"
-        ovr.save(ovrPath)
-        loadedOvr = OneVsRest.load(ovrPath)
-        self.assertEqual(loadedOvr.getFeaturesCol(), ovr.getFeaturesCol())
-        self.assertEqual(loadedOvr.getLabelCol(), ovr.getLabelCol())
-        self.assertEqual(loadedOvr.getClassifier().uid, ovr.getClassifier().uid)
-        modelPath = temp_path + "/ovrModel"
-        model.save(modelPath)
-        loadedModel = OneVsRestModel.load(modelPath)
-        for m, n in zip(model.models, loadedModel.models):
-            self.assertEqual(m.uid, n.uid)
-
 
 class HashingTFTest(SparkSessionTestCase):
 
@@ -1134,12 +1195,12 @@ class VectorTests(MLlibTestCase):
 
     def _test_serialize(self, v):
         self.assertEqual(v, ser.loads(ser.dumps(v)))
-        jvec = self.sc._jvm.SerDe.loads(bytearray(ser.dumps(v)))
-        nv = ser.loads(bytes(self.sc._jvm.SerDe.dumps(jvec)))
+        jvec = self.sc._jvm.org.apache.spark.ml.python.MLSerDe.loads(bytearray(ser.dumps(v)))
+        nv = ser.loads(bytes(self.sc._jvm.org.apache.spark.ml.python.MLSerDe.dumps(jvec)))
         self.assertEqual(v, nv)
         vs = [v] * 100
-        jvecs = self.sc._jvm.SerDe.loads(bytearray(ser.dumps(vs)))
-        nvs = ser.loads(bytes(self.sc._jvm.SerDe.dumps(jvecs)))
+        jvecs = self.sc._jvm.org.apache.spark.ml.python.MLSerDe.loads(bytearray(ser.dumps(vs)))
+        nvs = ser.loads(bytes(self.sc._jvm.org.apache.spark.ml.python.MLSerDe.dumps(jvecs)))
         self.assertEqual(vs, nvs)
 
     def test_serialize(self):

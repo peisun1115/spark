@@ -44,6 +44,7 @@ import org.apache.spark.sql.execution.UnsafeKVExternalSorter
 import org.apache.spark.sql.hive.HiveShim.{ShimFileSinkDesc => FileSinkDesc}
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SerializableJobConf
+import org.apache.spark.util.collection.unsafe.sort.UnsafeExternalSorter
 
 /**
  * Internal helper class that saves an RDD using a Hive OutputFormat.
@@ -178,21 +179,19 @@ private[hive] class SparkHiveWriterContainer(
 
   // this function is executed on executor side
   def writeToFile(context: TaskContext, iterator: Iterator[InternalRow]): Unit = {
-    if (iterator.hasNext) {
-      val (serializer, standardOI, fieldOIs, dataTypes, wrappers, outputData) = prepareForWrite()
-      executorSideSetup(context.stageId, context.partitionId, context.attemptNumber)
+    val (serializer, standardOI, fieldOIs, dataTypes, wrappers, outputData) = prepareForWrite()
+    executorSideSetup(context.stageId, context.partitionId, context.attemptNumber)
 
-      iterator.foreach { row =>
-        var i = 0
-        while (i < fieldOIs.length) {
-          outputData(i) = if (row.isNullAt(i)) null else wrappers(i)(row.get(i, dataTypes(i)))
-          i += 1
-        }
-        writer.write(serializer.serialize(outputData, standardOI))
+    iterator.foreach { row =>
+      var i = 0
+      while (i < fieldOIs.length) {
+        outputData(i) = if (row.isNullAt(i)) null else wrappers(i)(row.get(i, dataTypes(i)))
+        i += 1
       }
-
-      close()
+      writer.write(serializer.serialize(outputData, standardOI))
     }
+
+    close()
   }
 }
 
@@ -282,7 +281,9 @@ private[spark] class SparkHiveDynamicPartitionWriterContainer(
         StructType.fromAttributes(dataOutput),
         SparkEnv.get.blockManager,
         SparkEnv.get.serializerManager,
-        TaskContext.get().taskMemoryManager().pageSizeBytes)
+        TaskContext.get().taskMemoryManager().pageSizeBytes,
+        SparkEnv.get.conf.getLong("spark.shuffle.spill.numElementsForceSpillThreshold",
+          UnsafeExternalSorter.DEFAULT_NUM_ELEMENTS_FOR_SPILL_THRESHOLD))
 
       while (iterator.hasNext) {
         val inputRow = iterator.next()

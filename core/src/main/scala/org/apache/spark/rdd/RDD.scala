@@ -21,6 +21,7 @@ import java.util.Random
 
 import scala.collection.{mutable, Map}
 import scala.collection.mutable.ArrayBuffer
+import scala.io.Codec
 import scala.language.implicitConversions
 import scala.reflect.{classTag, ClassTag}
 
@@ -437,6 +438,7 @@ abstract class RDD[T: ClassTag](
                partitionCoalescer: Option[PartitionCoalescer] = Option.empty)
               (implicit ord: Ordering[T] = null)
       : RDD[T] = withScope {
+    require(numPartitions > 0, s"Number of partitions ($numPartitions) must be positive.")
     if (shuffle) {
       /** Distributes elements evenly across output partitions, starting from a random partition. */
       val distributePartition = (index: Int, items: Iterator[T]) => {
@@ -697,14 +699,18 @@ abstract class RDD[T: ClassTag](
    * Return an RDD created by piping elements to a forked external process.
    */
   def pipe(command: String): RDD[String] = withScope {
-    new PipedRDD(this, command)
+    // Similar to Runtime.exec(), if we are given a single string, split it into words
+    // using a standard StringTokenizer (i.e. by spaces)
+    pipe(PipedRDD.tokenize(command))
   }
 
   /**
    * Return an RDD created by piping elements to a forked external process.
    */
   def pipe(command: String, env: Map[String, String]): RDD[String] = withScope {
-    new PipedRDD(this, command, env)
+    // Similar to Runtime.exec(), if we are given a single string, split it into words
+    // using a standard StringTokenizer (i.e. by spaces)
+    pipe(PipedRDD.tokenize(command), env)
   }
 
   /**
@@ -725,6 +731,8 @@ abstract class RDD[T: ClassTag](
    *                          for (e &lt;- record._2) {f(e)}
    * @param separateWorkingDir Use separate working directories for each task.
    * @param bufferSize Buffer size for the stdin writer for the piped process.
+   * @param encoding Char encoding used for interacting (via stdin, stdout and stderr) with
+   *                 the piped process
    * @return the result RDD
    */
   def pipe(
@@ -733,12 +741,14 @@ abstract class RDD[T: ClassTag](
       printPipeContext: (String => Unit) => Unit = null,
       printRDDElement: (T, String => Unit) => Unit = null,
       separateWorkingDir: Boolean = false,
-      bufferSize: Int = 8192): RDD[String] = withScope {
+      bufferSize: Int = 8192,
+      encoding: String = Codec.defaultCharsetCodec.name): RDD[String] = withScope {
     new PipedRDD(this, command, env,
       if (printPipeContext ne null) sc.clean(printPipeContext) else null,
       if (printRDDElement ne null) sc.clean(printRDDElement) else null,
       separateWorkingDir,
-      bufferSize)
+      bufferSize,
+      encoding)
   }
 
   /**

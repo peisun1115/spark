@@ -48,6 +48,20 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
       Row("a||b"))
   }
 
+  test("string elt") {
+    val df = Seq[(String, String, String, Int)](("hello", "world", null, 15))
+      .toDF("a", "b", "c", "d")
+
+    checkAnswer(
+      df.selectExpr("elt(0, a, b, c)", "elt(1, a, b, c)", "elt(4, a, b, c)"),
+      Row(null, "hello", null))
+
+    // check implicit type cast
+    checkAnswer(
+      df.selectExpr("elt(4, a, b, c, d)", "elt('2', a, b, c, d)"),
+      Row("15", "world"))
+  }
+
   test("string Levenshtein distance") {
     val df = Seq(("kitten", "sitting"), ("frog", "fog")).toDF("l", "r")
     checkAnswer(df.select(levenshtein($"l", $"r")), Seq(Row(3), Row(1)))
@@ -189,15 +203,15 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
   }
 
   test("string locate function") {
-    val df = Seq(("aaads", "aa", "zz", 1)).toDF("a", "b", "c", "d")
+    val df = Seq(("aaads", "aa", "zz", 2)).toDF("a", "b", "c", "d")
 
     checkAnswer(
-      df.select(locate("aa", $"a"), locate("aa", $"a", 1)),
-      Row(1, 2))
+      df.select(locate("aa", $"a"), locate("aa", $"a", 2), locate("aa", $"a", 0)),
+      Row(1, 2, 0))
 
     checkAnswer(
-      df.selectExpr("locate(b, a)", "locate(b, a, d)"),
-      Row(1, 2))
+      df.selectExpr("locate(b, a)", "locate(b, a, d)", "locate(b, a, 3)"),
+      Row(1, 2, 0))
   }
 
   test("string padding functions") {
@@ -210,6 +224,21 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
     checkAnswer(
       df.selectExpr("lpad(a, b, c)", "rpad(a, b, c)", "lpad(a, 1, c)", "rpad(a, 1, c)"),
       Row("???hi", "hi???", "h", "h"))
+  }
+
+  test("string parse_url function") {
+    val df = Seq[String](("http://userinfo@spark.apache.org/path?query=1#Ref"))
+      .toDF("url")
+
+    checkAnswer(
+      df.selectExpr(
+        "parse_url(url, 'HOST')", "parse_url(url, 'PATH')",
+        "parse_url(url, 'QUERY')", "parse_url(url, 'REF')",
+        "parse_url(url, 'PROTOCOL')", "parse_url(url, 'FILE')",
+        "parse_url(url, 'AUTHORITY')", "parse_url(url, 'USERINFO')",
+        "parse_url(url, 'QUERY', 'query')"),
+      Row("spark.apache.org", "/path", "query=1", "Ref",
+        "http", "/path?query=1", "userinfo@spark.apache.org", "userinfo", "1"))
   }
 
   test("string repeat function") {
@@ -332,5 +361,25 @@ class StringFunctionsSuite extends QueryTest with SharedSQLContext {
     checkAnswer(
       df2.filter("b>0").selectExpr("format_number(a, b)"),
       Row("5.0000") :: Row("4.000") :: Row("4.000") :: Row("4.000") :: Row("3.00") :: Nil)
+  }
+
+  test("string sentences function") {
+    val df = Seq(("Hi there! The price was $1,234.56.... But, not now.", "en", "US"))
+      .toDF("str", "language", "country")
+
+    checkAnswer(
+      df.selectExpr("sentences(str, language, country)"),
+      Row(Seq(Seq("Hi", "there"), Seq("The", "price", "was"), Seq("But", "not", "now"))))
+
+    // Type coercion
+    checkAnswer(
+      df.selectExpr("sentences(null)", "sentences(10)", "sentences(3.14)"),
+      Row(null, Seq(Seq("10")), Seq(Seq("3.14"))))
+
+    // Argument number exception
+    val m = intercept[AnalysisException] {
+      df.selectExpr("sentences()")
+    }.getMessage
+    assert(m.contains("Invalid number of arguments for function sentences"))
   }
 }

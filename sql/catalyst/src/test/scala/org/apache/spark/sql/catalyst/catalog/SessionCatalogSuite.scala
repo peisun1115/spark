@@ -197,8 +197,8 @@ class SessionCatalogSuite extends SparkFunSuite {
 
   test("create temp table") {
     val catalog = new SessionCatalog(newBasicCatalog())
-    val tempTable1 = Range(1, 10, 1, 10, Seq())
-    val tempTable2 = Range(1, 20, 2, 10, Seq())
+    val tempTable1 = Range(1, 10, 1, 10)
+    val tempTable2 = Range(1, 20, 2, 10)
     catalog.createTempView("tbl1", tempTable1, overrideIfExists = false)
     catalog.createTempView("tbl2", tempTable2, overrideIfExists = false)
     assert(catalog.getTempTable("tbl1") == Option(tempTable1))
@@ -243,7 +243,7 @@ class SessionCatalogSuite extends SparkFunSuite {
   test("drop temp table") {
     val externalCatalog = newBasicCatalog()
     val sessionCatalog = new SessionCatalog(externalCatalog)
-    val tempTable = Range(1, 10, 2, 10, Seq())
+    val tempTable = Range(1, 10, 2, 10)
     sessionCatalog.createTempView("tbl1", tempTable, overrideIfExists = false)
     sessionCatalog.setCurrentDatabase("db2")
     assert(sessionCatalog.getTempTable("tbl1") == Some(tempTable))
@@ -304,7 +304,7 @@ class SessionCatalogSuite extends SparkFunSuite {
   test("rename temp table") {
     val externalCatalog = newBasicCatalog()
     val sessionCatalog = new SessionCatalog(externalCatalog)
-    val tempTable = Range(1, 10, 2, 10, Seq())
+    val tempTable = Range(1, 10, 2, 10)
     sessionCatalog.createTempView("tbl1", tempTable, overrideIfExists = false)
     sessionCatalog.setCurrentDatabase("db2")
     assert(sessionCatalog.getTempTable("tbl1") == Option(tempTable))
@@ -383,7 +383,7 @@ class SessionCatalogSuite extends SparkFunSuite {
   test("lookup table relation") {
     val externalCatalog = newBasicCatalog()
     val sessionCatalog = new SessionCatalog(externalCatalog)
-    val tempTable1 = Range(1, 10, 1, 10, Seq())
+    val tempTable1 = Range(1, 10, 1, 10)
     val metastoreTable1 = externalCatalog.getTable("db2", "tbl1")
     sessionCatalog.createTempView("tbl1", tempTable1, overrideIfExists = false)
     sessionCatalog.setCurrentDatabase("db2")
@@ -422,7 +422,7 @@ class SessionCatalogSuite extends SparkFunSuite {
     assert(!catalog.tableExists(TableIdentifier("tbl1", Some("db1"))))
     assert(!catalog.tableExists(TableIdentifier("tbl2", Some("db1"))))
     // If database is explicitly specified, do not check temporary tables
-    val tempTable = Range(1, 10, 1, 10, Seq())
+    val tempTable = Range(1, 10, 1, 10)
     catalog.createTempView("tbl3", tempTable, overrideIfExists = false)
     assert(!catalog.tableExists(TableIdentifier("tbl3", Some("db2"))))
     // If database is not explicitly specified, check the current database
@@ -432,9 +432,42 @@ class SessionCatalogSuite extends SparkFunSuite {
     assert(catalog.tableExists(TableIdentifier("tbl3")))
   }
 
+  test("tableExists on temporary views") {
+    val catalog = new SessionCatalog(newBasicCatalog())
+    val tempTable = Range(1, 10, 2, 10)
+    assert(!catalog.tableExists(TableIdentifier("view1")))
+    assert(!catalog.tableExists(TableIdentifier("view1", Some("default"))))
+    catalog.createTempView("view1", tempTable, overrideIfExists = false)
+    assert(catalog.tableExists(TableIdentifier("view1")))
+    assert(!catalog.tableExists(TableIdentifier("view1", Some("default"))))
+  }
+
+  test("getTableMetadata on temporary views") {
+    val catalog = new SessionCatalog(newBasicCatalog())
+    val tempTable = Range(1, 10, 2, 10)
+    val m = intercept[AnalysisException] {
+      catalog.getTableMetadata(TableIdentifier("view1"))
+    }.getMessage
+    assert(m.contains("Table or view 'view1' not found in database 'default'"))
+
+    val m2 = intercept[AnalysisException] {
+      catalog.getTableMetadata(TableIdentifier("view1", Some("default")))
+    }.getMessage
+    assert(m2.contains("Table or view 'view1' not found in database 'default'"))
+
+    catalog.createTempView("view1", tempTable, overrideIfExists = false)
+    assert(catalog.getTableMetadata(TableIdentifier("view1")).identifier.table == "view1")
+    assert(catalog.getTableMetadata(TableIdentifier("view1")).schema(0).name == "id")
+
+    val m3 = intercept[AnalysisException] {
+      catalog.getTableMetadata(TableIdentifier("view1", Some("default")))
+    }.getMessage
+    assert(m3.contains("Table or view 'view1' not found in database 'default'"))
+  }
+
   test("list tables without pattern") {
     val catalog = new SessionCatalog(newBasicCatalog())
-    val tempTable = Range(1, 10, 2, 10, Seq())
+    val tempTable = Range(1, 10, 2, 10)
     catalog.createTempView("tbl1", tempTable, overrideIfExists = false)
     catalog.createTempView("tbl4", tempTable, overrideIfExists = false)
     assert(catalog.listTables("db1").toSet ==
@@ -451,7 +484,7 @@ class SessionCatalogSuite extends SparkFunSuite {
 
   test("list tables with pattern") {
     val catalog = new SessionCatalog(newBasicCatalog())
-    val tempTable = Range(1, 10, 2, 10, Seq())
+    val tempTable = Range(1, 10, 2, 10)
     catalog.createTempView("tbl1", tempTable, overrideIfExists = false)
     catalog.createTempView("tbl4", tempTable, overrideIfExists = false)
     assert(catalog.listTables("db1", "*").toSet == catalog.listTables("db1").toSet)
@@ -950,16 +983,16 @@ class SessionCatalogSuite extends SparkFunSuite {
     catalog.createFunction(newFunc("not_me", Some("db2")), ignoreIfExists = false)
     catalog.createTempFunction("func1", info1, tempFunc1, ignoreIfExists = false)
     catalog.createTempFunction("yes_me", info2, tempFunc2, ignoreIfExists = false)
-    assert(catalog.listFunctions("db1", "*").toSet ==
+    assert(catalog.listFunctions("db1", "*").map(_._1).toSet ==
       Set(FunctionIdentifier("func1"),
         FunctionIdentifier("yes_me")))
-    assert(catalog.listFunctions("db2", "*").toSet ==
+    assert(catalog.listFunctions("db2", "*").map(_._1).toSet ==
       Set(FunctionIdentifier("func1"),
         FunctionIdentifier("yes_me"),
         FunctionIdentifier("func1", Some("db2")),
         FunctionIdentifier("func2", Some("db2")),
         FunctionIdentifier("not_me", Some("db2"))))
-    assert(catalog.listFunctions("db2", "func*").toSet ==
+    assert(catalog.listFunctions("db2", "func*").map(_._1).toSet ==
       Set(FunctionIdentifier("func1"),
         FunctionIdentifier("func1", Some("db2")),
         FunctionIdentifier("func2", Some("db2"))))

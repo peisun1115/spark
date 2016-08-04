@@ -32,6 +32,7 @@ from pyspark.sql.catalog import Catalog
 from pyspark.sql.conf import RuntimeConfig
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.readwriter import DataFrameReader
+from pyspark.sql.streaming import DataStreamReader
 from pyspark.sql.types import Row, DataType, StringType, StructType, _verify_type, \
     _infer_schema, _has_nulltype, _merge_type, _create_converter, _parse_datatype_string
 from pyspark.sql.utils import install_exception_handler
@@ -65,12 +66,11 @@ class SparkSession(object):
     tables, execute SQL over tables, cache tables, and read parquet files.
     To create a SparkSession, use the following builder pattern:
 
-    >>> spark = SparkSession.builder \
-            .master("local") \
-            .appName("Word Count") \
-            .config("spark.some.config.option", "some-value") \
-            .getOrCreate()
-
+    >>> spark = SparkSession.builder \\
+    ...     .master("local") \\
+    ...     .appName("Word Count") \\
+    ...     .config("spark.some.config.option", "some-value") \\
+    ...     .getOrCreate()
     """
 
     class Builder(object):
@@ -86,11 +86,13 @@ class SparkSession(object):
             both :class:`SparkConf` and :class:`SparkSession`'s own configuration.
 
             For an existing SparkConf, use `conf` parameter.
+
             >>> from pyspark.conf import SparkConf
             >>> SparkSession.builder.config(conf=SparkConf())
             <pyspark.sql.session...
 
             For a (key, value) pair, you can omit parameter names.
+
             >>> SparkSession.builder.config("spark.some.config.option", "some-value")
             <pyspark.sql.session...
 
@@ -120,6 +122,8 @@ class SparkSession(object):
         def appName(self, name):
             """Sets a name for the application, which will be shown in the Spark web UI.
 
+            If no application name is set, a randomly generated name will be used.
+
             :param name: an application name
             """
             return self.config("spark.app.name", name)
@@ -133,18 +137,49 @@ class SparkSession(object):
 
         @since(2.0)
         def getOrCreate(self):
-            """Gets an existing :class:`SparkSession` or, if there is no existing one, creates a new
-            one based on the options set in this builder.
+            """Gets an existing :class:`SparkSession` or, if there is no existing one, creates a
+            new one based on the options set in this builder.
+
+            This method first checks whether there is a valid global default SparkSession, and if
+            yes, return that one. If no valid global default SparkSession exists, the method
+            creates a new SparkSession and assigns the newly created SparkSession as the global
+            default.
+
+            >>> s1 = SparkSession.builder.config("k1", "v1").getOrCreate()
+            >>> s1.conf.get("k1") == s1.sparkContext.getConf().get("k1") == "v1"
+            True
+
+            In case an existing SparkSession is returned, the config options specified
+            in this builder will be applied to the existing SparkSession.
+
+            >>> s2 = SparkSession.builder.config("k2", "v2").getOrCreate()
+            >>> s1.conf.get("k1") == s2.conf.get("k1")
+            True
+            >>> s1.conf.get("k2") == s2.conf.get("k2")
+            True
             """
             with self._lock:
-                from pyspark.conf import SparkConf
                 from pyspark.context import SparkContext
-                from pyspark.sql.context import SQLContext
-                sparkConf = SparkConf()
+                from pyspark.conf import SparkConf
+                session = SparkSession._instantiatedContext
+                if session is None:
+                    sparkConf = SparkConf()
+                    for key, value in self._options.items():
+                        sparkConf.set(key, value)
+                    sc = SparkContext.getOrCreate(sparkConf)
+                    # This SparkContext may be an existing one.
+                    for key, value in self._options.items():
+                        # we need to propagate the confs
+                        # before we create the SparkSession. Otherwise, confs like
+                        # warehouse path and metastore url will not be set correctly (
+                        # these confs cannot be changed once the SparkSession is created).
+                        sc._conf.set(key, value)
+                    session = SparkSession(sc)
                 for key, value in self._options.items():
-                    sparkConf.set(key, value)
-                sparkContext = SparkContext.getOrCreate(sparkConf)
-                return SQLContext.getOrCreate(sparkContext).sparkSession
+                    session.conf.set(key, value)
+                for key, value in self._options.items():
+                    session.sparkContext._conf.set(key, value)
+                return session
 
     builder = Builder()
 
@@ -175,7 +210,7 @@ class SparkSession(object):
         if jsparkSession is None:
             jsparkSession = self._jvm.SparkSession(self._jsc.sc())
         self._jsparkSession = jsparkSession
-        self._jwrapped = self._jsparkSession.wrapped()
+        self._jwrapped = self._jsparkSession.sqlContext()
         self._wrapped = SQLContext(self._sc, self, self._jwrapped)
         _monkey_patch_RDD(self)
         install_exception_handler()
@@ -190,6 +225,18 @@ class SparkSession(object):
         table cache.
         """
         return self.__class__(self._sc, self._jsparkSession.newSession())
+
+    @property
+    @since(2.0)
+    def sparkContext(self):
+        """Returns the underlying :class:`SparkContext`."""
+        return self._sc
+
+    @property
+    @since(2.0)
+    def version(self):
+        """The version of Spark on which this application is running."""
+        return self._jsparkSession.version()
 
     @property
     @since(2.0)
@@ -328,7 +375,7 @@ class SparkSession(object):
 
     def _createFromLocal(self, data, schema):
         """
-        Create an RDD for DataFrame from an list or pandas.DataFrame, returns
+        Create an RDD for DataFrame from a list or pandas.DataFrame, returns
         the RDD and schema.
         """
         # make sure data could consumed multiple times
@@ -517,11 +564,53 @@ class SparkSession(object):
         """
         return DataFrameReader(self._wrapped)
 
+    @property
+    @since(2.0)
+    def readStream(self):
+        """
+        Returns a :class:`DataStreamReader` that can be used to read data streams
+        as a streaming :class:`DataFrame`.
+
+        .. note:: Experimental.
+
+        :return: :class:`DataStreamReader`
+        """
+        return DataStreamReader(self._wrapped)
+
+    @property
+    @since(2.0)
+    def streams(self):
+        """Returns a :class:`StreamingQueryManager` that allows managing all the
+        :class:`StreamingQuery` StreamingQueries active on `this` context.
+
+        .. note:: Experimental.
+
+        :return: :class:`StreamingQueryManager`
+        """
+        from pyspark.sql.streaming import StreamingQueryManager
+        return StreamingQueryManager(self._jsparkSession.streams())
+
     @since(2.0)
     def stop(self):
         """Stop the underlying :class:`SparkContext`.
         """
         self._sc.stop()
+
+    @since(2.0)
+    def __enter__(self):
+        """
+        Enable 'with SparkSession.builder.(...).getOrCreate() as session: app' syntax.
+        """
+        return self
+
+    @since(2.0)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Enable 'with SparkSession.builder.(...).getOrCreate() as session: app' syntax.
+
+        Specifically stop the SparkSession on exit of the with block.
+        """
+        self.stop()
 
 
 def _test():
